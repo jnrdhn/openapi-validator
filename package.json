@@ -1,5 +1,5 @@
 {
-  "name": "@janardhan-edara/openapi-validator",
+  "name": "@jnrdhn/openapi-validator",
   "version": "0.1.0",
   "description": "CLI tool that validates whether OpenAPI 3.x endpoints are executable — checks reachability and classifies each endpoint by HTTP response",
   "bin": {
