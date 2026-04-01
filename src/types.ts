@@ -175,6 +175,8 @@ export interface EndpointResult {
   };
   durationMs: number;
   deprecated: boolean;
+  /** Number of retries made before this result was recorded (omitted when 0). */
+  retryCount?: number;
 }
 
 export interface ValidationReport {
@@ -210,6 +212,10 @@ export interface ValidatorConfig {
   outputPath: string;
   concurrency: number;
   timeoutMs: number;
+  /** Max retry attempts for transient failures (429, 502–504, timeout). Default: 2. */
+  retries: number;
+  /** Base delay in ms between retries (exponential backoff). Default: 1000. */
+  retryDelayMs: number;
   /** Skip endpoints tagged with these tags */
   skipTags?: string[];
   /** Only run endpoints tagged with these tags */

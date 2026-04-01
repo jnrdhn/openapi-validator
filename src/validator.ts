@@ -50,18 +50,29 @@ function buildAuthHeaders(auth: AuthConfig): Record<string, string> {
 
 // ─── Single Endpoint Executor ─────────────────────────────────────────────────
 
+/** Internal wrapper returned by executeEndpoint — rawBody is used for deterministic
+ *  resolver recording after each phase and is not included in the final report. */
+interface ExecutionOutput {
+  result: EndpointResult;
+  rawBody?: unknown; // set only for 2xx responses
+}
+
+const RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
+
 async function executeEndpoint(
   endpoint: NormalizedEndpoint,
   baseUrl: string,
   auth: AuthConfig,
   resolver: ParamResolver,
   timeoutMs: number,
+  retries: number,
+  retryDelayMs: number,
   extraHeaders: Record<string, string> = {}
-): Promise<EndpointResult> {
+): Promise<ExecutionOutput> {
   const start = Date.now();
 
   // Build URL + path params
-  const { url: basePathUrl, usedParams } = resolver.buildUrl(baseUrl, endpoint.path, endpoint);
+  const { url: basePathUrl } = resolver.buildUrl(baseUrl, endpoint.path, endpoint);
 
   // Build query params
   const queryParams: Record<string, string> = {};
@@ -99,72 +110,109 @@ async function executeEndpoint(
     queryParams,
   };
 
-  // Execute request
-  try {
+  let retryCount = 0;
+
+  while (true) {
+    // Each attempt gets its own timeout — a previous attempt's abort must not carry over
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-    let httpStatus: number;
-    let responseBody: unknown;
+    interface FetchOk { httpStatus: number; responseBody: unknown; retryAfterMs?: number }
+    interface FetchErr { err: Error; isTimeout: boolean }
+    let fetchOk: FetchOk | undefined;
+    let fetchErr: FetchErr | undefined;
 
     try {
-      const response = await fetch(urlWithQuery, {
-        method: endpoint.method,
-        headers,
-        body: bodyPayload !== undefined ? JSON.stringify(bodyPayload) : undefined,
-        signal: controller.signal,
-      });
+      try {
+        const response = await fetch(urlWithQuery, {
+          method: endpoint.method,
+          headers,
+          body: bodyPayload !== undefined ? JSON.stringify(bodyPayload) : undefined,
+          signal: controller.signal,
+        });
 
-      httpStatus = response.status;
-      const text = await response.text();
-      responseBody = tryParseJson(text) ?? text;
-    } finally {
-      clearTimeout(timer);
+        const httpStatus = response.status;
+        const text = await response.text();
+        const responseBody = tryParseJson(text) ?? text;
+
+        let retryAfterMs: number | undefined;
+        if (RETRYABLE_STATUSES.has(httpStatus) && retryCount < retries) {
+          if (httpStatus === 429) {
+            const header = response.headers.get("Retry-After");
+            const secs = header ? parseInt(header, 10) : NaN;
+            retryAfterMs = !isNaN(secs) ? secs * 1000 : retryDelayMs * Math.pow(2, retryCount);
+          } else {
+            retryAfterMs = retryDelayMs * Math.pow(2, retryCount);
+          }
+        }
+
+        fetchOk = { httpStatus, responseBody, retryAfterMs };
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch (err) {
+      const e = err instanceof Error ? err : new Error(String(err));
+      fetchErr = { err: e, isTimeout: e.name === "AbortError" };
+    }
+
+    if (fetchErr) {
+      if (fetchErr.isTimeout && retryCount < retries) {
+        await Bun.sleep(retryDelayMs * Math.pow(2, retryCount));
+        retryCount++;
+        continue;
+      }
+      return {
+        result: {
+          operationId: endpoint.operationId,
+          method: endpoint.method,
+          path: endpoint.path,
+          summary: endpoint.summary,
+          tags: endpoint.tags,
+          status: "unreachable",
+          executable: false,
+          httpStatusCode: null,
+          responseSummary: fetchErr.isTimeout
+            ? `Request timed out after ${timeoutMs}ms`
+            : `Network error: ${fetchErr.err.message}`,
+          responseBody: null,
+          requestDetails,
+          durationMs: Date.now() - start,
+          deprecated: endpoint.deprecated,
+          retryCount: retryCount > 0 ? retryCount : undefined,
+        },
+      };
+    }
+
+    const { httpStatus, responseBody, retryAfterMs } = fetchOk!;
+
+    if (retryAfterMs !== undefined) {
+      await Bun.sleep(retryAfterMs);
+      retryCount++;
+      continue;
     }
 
     const status = classifyStatus(httpStatus);
     const executable = isExecutable(status);
-
-    // Record response so later endpoints can reuse IDs
-    if (httpStatus >= 200 && httpStatus < 300) {
-      resolver.recordResponse(endpoint.path, responseBody, endpoint.method);
-    }
-
     const truncated = truncateBody(responseBody);
 
     return {
-      operationId: endpoint.operationId,
-      method: endpoint.method,
-      path: endpoint.path,
-      summary: endpoint.summary,
-      tags: endpoint.tags,
-      status,
-      executable,
-      httpStatusCode: httpStatus,
-      responseSummary: buildSummary(status, httpStatus, endpoint),
-      responseBody: truncated,
-      requestDetails,
-      durationMs: Date.now() - start,
-      deprecated: endpoint.deprecated,
-    };
-  } catch (err) {
-    const isTimeout = err instanceof Error && err.name === "AbortError";
-    const message = err instanceof Error ? err.message : String(err);
-
-    return {
-      operationId: endpoint.operationId,
-      method: endpoint.method,
-      path: endpoint.path,
-      summary: endpoint.summary,
-      tags: endpoint.tags,
-      status: "unreachable",
-      executable: false,
-      httpStatusCode: null,
-      responseSummary: isTimeout ? `Request timed out after ${timeoutMs}ms` : `Network error: ${message}`,
-      responseBody: null,
-      requestDetails,
-      durationMs: Date.now() - start,
-      deprecated: endpoint.deprecated,
+      result: {
+        operationId: endpoint.operationId,
+        method: endpoint.method,
+        path: endpoint.path,
+        summary: endpoint.summary,
+        tags: endpoint.tags,
+        status,
+        executable,
+        httpStatusCode: httpStatus,
+        responseSummary: buildSummary(status, httpStatus, endpoint),
+        responseBody: truncated,
+        requestDetails,
+        durationMs: Date.now() - start,
+        deprecated: endpoint.deprecated,
+        retryCount: retryCount > 0 ? retryCount : undefined,
+      },
+      rawBody: httpStatus >= 200 && httpStatus < 300 ? responseBody : undefined,
     };
   }
 }
@@ -273,21 +321,32 @@ export async function validateEndpoints(
 
   for (const phase of phases) {
     const tasks = phase.map((endpoint) => async () => {
-      const result = await executeEndpoint(
+      const output = await executeEndpoint(
         endpoint,
         baseUrl,
         config.auth,
         resolver,
         config.timeoutMs,
+        config.retries,
+        config.retryDelayMs,
         config.extraHeaders
       );
       completed++;
-      onProgress?.(result, completed, filtered.length);
-      return result;
+      onProgress?.(output.result, completed, filtered.length);
+      return output;
     });
 
-    const phaseResults = await runWithConcurrency(tasks, config.concurrency);
-    allResults.push(...phaseResults);
+    const phaseOutputs = await runWithConcurrency(tasks, config.concurrency);
+
+    // Record 2xx responses in deterministic spec order so the resolver state
+    // is identical across runs regardless of which requests finished first.
+    const phaseOrder = new Map(phase.map((e, i) => [e.operationId, i]));
+    phaseOutputs
+      .filter((o) => o.rawBody !== undefined)
+      .sort((a, b) => (phaseOrder.get(a.result.operationId) ?? 0) - (phaseOrder.get(b.result.operationId) ?? 0))
+      .forEach((o) => resolver.recordResponse(o.result.path, o.rawBody, o.result.method));
+
+    allResults.push(...phaseOutputs.map((o) => o.result));
   }
 
   // Re-order results to match original spec order

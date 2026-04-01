@@ -61,6 +61,8 @@ function parseArgs(argv: string[]): ValidatorConfig & { help?: boolean } {
     outputPath: get("--output") ?? get("-o") ?? "report.json",
     concurrency: parseInt(get("--concurrency") ?? get("-c") ?? "3", 10),
     timeoutMs: parseInt(get("--timeout") ?? "10000", 10),
+    retries: parseInt(get("--retry") ?? "2", 10),
+    retryDelayMs: 1000,
     skipTags: getAll("--skip-tag"),
     onlyTags: getAll("--only-tag"),
     skipDeprecated: has("--skip-deprecated"),
@@ -171,6 +173,7 @@ OPTIONS
   --output, -o  <path>       Output report path (default: report.json)
   --concurrency,-c <n>       Parallel requests (default: 3)
   --timeout     <ms>         Request timeout in ms (default: 10000)
+  --retry       <n>          Retry attempts for 429/502-504/timeout (default: 2, 0 to disable)
   --only-tag    <tag>        Only test endpoints with this tag (repeatable)
   --skip-tag    <tag>        Skip endpoints with this tag (repeatable)
   --skip-deprecated          Skip deprecated endpoints
