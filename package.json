@@ -19,6 +19,10 @@
     "cli",
     "api-testing"
   ],
+  "files": [
+    "src/",
+    "README.md"
+  ],
   "license": "MIT",
   "devDependencies": {
     "@types/bun": "latest",
