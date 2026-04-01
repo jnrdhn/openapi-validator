@@ -1,5 +1,7 @@
 # openapi-validator
 
+[![GitHub](https://img.shields.io/badge/github-jnrdhn%2Fopenapi--validator-blue?logo=github)](https://github.com/jnrdhn/openapi-validator)
+
 A CLI tool that validates whether OpenAPI 3.x endpoints are **executable** — meaning they exist and respond on a real server.
 
 It does **not** validate functional correctness or response schema conformance. It only checks reachability and classifies each endpoint by its HTTP response. The primary output is an `executable` boolean per endpoint: **true** means the path/method exists on the server.
