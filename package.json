@@ -1,6 +1,6 @@
 {
   "name": "@jnrdhn/openapi-validator",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "CLI tool that validates whether OpenAPI 3.x endpoints are executable — checks reachability and classifies each endpoint by HTTP response",
   "bin": {
     "openapi-validator": "src/cli.ts"
