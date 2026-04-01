@@ -127,7 +127,7 @@ async function executeEndpoint(
 
     // Record response so later endpoints can reuse IDs
     if (httpStatus >= 200 && httpStatus < 300) {
-      resolver.recordResponse(endpoint.path, responseBody);
+      resolver.recordResponse(endpoint.path, responseBody, endpoint.method);
     }
 
     const truncated = truncateBody(responseBody);
@@ -263,31 +263,36 @@ export async function validateEndpoints(
     filtered = filtered.filter((e) => !e.deprecated);
   }
 
-  // Sort so list/collection endpoints run first — their responses feed the resolver
+  // Sort and group into phases so ID-producing endpoints run before ID-consuming ones
   const sorted = sortByDependency(filtered);
+  const phases = buildExecutionPhases(sorted);
 
   const resolver = new ParamResolver();
   let completed = 0;
+  const allResults: EndpointResult[] = [];
 
-  const tasks = sorted.map((endpoint) => async () => {
-    const result = await executeEndpoint(
-      endpoint,
-      baseUrl,
-      config.auth,
-      resolver,
-      config.timeoutMs,
-      config.extraHeaders
-    );
-    completed++;
-    onProgress?.(result, completed, sorted.length);
-    return result;
-  });
+  for (const phase of phases) {
+    const tasks = phase.map((endpoint) => async () => {
+      const result = await executeEndpoint(
+        endpoint,
+        baseUrl,
+        config.auth,
+        resolver,
+        config.timeoutMs,
+        config.extraHeaders
+      );
+      completed++;
+      onProgress?.(result, completed, filtered.length);
+      return result;
+    });
 
-  // Run with controlled concurrency
-  const results = await runWithConcurrency(tasks, config.concurrency);
+    const phaseResults = await runWithConcurrency(tasks, config.concurrency);
+    allResults.push(...phaseResults);
+  }
 
   // Re-order results to match original spec order
   const originalOrder = new Map(filtered.map((e, i) => [e.operationId, i]));
+  const results = allResults;
   results.sort((a, b) => (originalOrder.get(a.operationId) ?? 0) - (originalOrder.get(b.operationId) ?? 0));
 
   const summary = buildSummaryStats(results);
@@ -306,16 +311,61 @@ export async function validateEndpoints(
 }
 
 /**
- * Sort endpoints so that parameterless GET endpoints run before endpoints
- * with path params — giving the resolver a chance to capture real IDs.
+ * Sort endpoints by:
+ * 1. Resource depth (shallower paths first — /users before /users/{id}/posts)
+ * 2. Resource base path (groups same-resource endpoints together)
+ * 3. Method lifecycle order within each resource:
+ *    list GET → POST (create) → item GET → PUT → PATCH → DELETE
  */
 function sortByDependency(endpoints: NormalizedEndpoint[]): NormalizedEndpoint[] {
-  const hasPathParams = (e: NormalizedEndpoint) =>
-    e.parameters.some((p) => p.in === "path" && p.required);
+  const METHOD_ORDER: Record<string, number> = {
+    GET: 2, POST: 1, PUT: 3, PATCH: 4, DELETE: 5,
+  };
 
-  const listFirst = endpoints.filter((e) => e.method === "GET" && !hasPathParams(e));
-  const rest = endpoints.filter((e) => !(e.method === "GET" && !hasPathParams(e)));
-  return [...listFirst, ...rest];
+  // Strip the trailing /{param} to get the collection/resource base path
+  const resourceBase = (path: string) => path.replace(/\/\{[^}]+\}$/, "");
+
+  // Count path parameters — used as nesting depth
+  const depthOf = (path: string) => (path.match(/\{[^}]+\}/g) ?? []).length;
+
+  const methodScore = (e: NormalizedEndpoint) => {
+    const hasPathParams = e.parameters.some((p) => p.in === "path" && p.required);
+    if (e.method === "GET" && !hasPathParams) return 0; // list endpoints always first
+    return METHOD_ORDER[e.method] ?? 6;
+  };
+
+  return [...endpoints].sort((a, b) => {
+    const baseA = resourceBase(a.path);
+    const baseB = resourceBase(b.path);
+
+    // 1. Shallower resources first
+    const depthDiff = depthOf(baseA) - depthOf(baseB);
+    if (depthDiff !== 0) return depthDiff;
+
+    // 2. Group by resource base (alphabetical for stability)
+    if (baseA !== baseB) return baseA.localeCompare(baseB);
+
+    // 3. Within same resource, lifecycle order
+    return methodScore(a) - methodScore(b);
+  });
+}
+
+/**
+ * Group sorted endpoints into execution phases by path-parameter depth.
+ * Phase 0 (no path params) completes before Phase 1 (1 path param) starts, etc.
+ * This prevents race conditions where a parameterized endpoint fires before
+ * the list endpoint that would have provided its ID.
+ */
+function buildExecutionPhases(sorted: NormalizedEndpoint[]): NormalizedEndpoint[][] {
+  const phaseMap = new Map<number, NormalizedEndpoint[]>();
+  for (const ep of sorted) {
+    const depth = (ep.path.match(/\{[^}]+\}/g) ?? []).length;
+    if (!phaseMap.has(depth)) phaseMap.set(depth, []);
+    phaseMap.get(depth)!.push(ep);
+  }
+  return [...phaseMap.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([, eps]) => eps);
 }
 
 function buildSummaryStats(results: EndpointResult[]) {

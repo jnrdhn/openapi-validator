@@ -114,28 +114,31 @@ export class ParamResolver {
   /**
    * Record values extracted from a successful API response.
    * Looks for common ID fields at the top level and inside list arrays.
+   * Write methods (POST/PUT/PATCH) overwrite existing values — a freshly-created
+   * resource's ID is more relevant than one captured from a prior list response.
    */
-  recordResponse(path: string, responseBody: unknown): void {
+  recordResponse(path: string, responseBody: unknown, method = "GET"): void {
     if (!responseBody || typeof responseBody !== "object") return;
 
+    const overwrite = ["POST", "PUT", "PATCH"].includes(method.toUpperCase());
     const body = responseBody as Record<string, unknown>;
 
     // Direct ID fields on the root object
-    this.extractIds(body);
+    this.extractIds(body, overwrite);
 
     // Items inside list-style arrays: { items: [...], data: [...], results: [...], etc. }
     for (const key of ["items", "data", "results", "records", "entries", "list", "value"]) {
       const arr = body[key];
       if (Array.isArray(arr) && arr.length > 0) {
         const first = arr[0];
-        if (first && typeof first === "object") this.extractIds(first as Record<string, unknown>);
+        if (first && typeof first === "object") this.extractIds(first as Record<string, unknown>, overwrite);
       }
     }
 
     // If root is an array
     if (Array.isArray(responseBody) && responseBody.length > 0) {
       const first = responseBody[0];
-      if (first && typeof first === "object") this.extractIds(first as Record<string, unknown>);
+      if (first && typeof first === "object") this.extractIds(first as Record<string, unknown>, overwrite);
     }
 
     // Derive param names from path segments for context
@@ -152,15 +155,15 @@ export class ParamResolver {
     }
   }
 
-  private extractIds(obj: Record<string, unknown>): void {
+  private extractIds(obj: Record<string, unknown>, overwrite = false): void {
     for (const [key, value] of Object.entries(obj)) {
       if (value === null || value === undefined) continue;
       const k = key.toLowerCase();
-      if (!this.resolved.has(k)) {
+      if (overwrite || !this.resolved.has(k)) {
         this.resolved.set(k, value);
       }
-      // Also store plain "id" if not set
-      if ((k === "id" || k.endsWith("id") || k.endsWith("_id")) && !this.resolved.has("id")) {
+      // Also store plain "id" if not set (or overwriting)
+      if ((k === "id" || k.endsWith("id") || k.endsWith("_id")) && (overwrite || !this.resolved.has("id"))) {
         this.resolved.set("id", value);
       }
     }
