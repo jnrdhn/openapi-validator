@@ -32,7 +32,12 @@ OpenAPI spec file/URL
   → loadSpec() + normalizeSpec()     [parser.ts]
   → NormalizedEndpoint[]
   → validateEndpoints()              [validator.ts]
-      → sortByDependency()           list-first so ParamResolver captures IDs early
+      → sortByDependency()           resource-aware sort: shallower paths first,
+                                     grouped by resource base, lifecycle method order
+                                     (list GET → POST → item GET → PUT → PATCH → DELETE)
+      → buildExecutionPhases()       groups endpoints by path-param depth into phases;
+                                     phase N completes before phase N+1 starts —
+                                     prevents race conditions with concurrency > 1
       → executeEndpoint() × N        fetch() with sampled params + resolved path params
       → classifyStatus()             maps HTTP status → EndpointStatus
   → ValidationReport → report.json
@@ -58,7 +63,7 @@ The `executable` boolean is the primary signal: **true** means the path/method e
 
 - **No functional validation** — the goal is endpoint existence/reachability, not schema conformance
 - **Generalize, don't hardcode** — must work with any OpenAPI 3.x spec, not tied to any specific API
-- **Path param resolution** — `ParamResolver` in `sampler.ts` records IDs from list endpoint responses and substitutes them into later parameterized calls (e.g. GET /users runs before GET /users/{userId})
+- **Path param resolution** — `ParamResolver` in `sampler.ts` records IDs from all 2xx responses (any method) and substitutes them into later parameterized calls. POST/PUT/PATCH responses overwrite previously recorded IDs (fresher values win). Phase-based execution guarantees IDs are available before parameterized endpoints run.
 - **Synthetic params** — `sampleValue()` in `sampler.ts` generates minimal test values; 400 responses from bad params are expected and classified as `bad_request` (still executable)
 - **Auth is injected globally** — one auth config applies to all requests; per-endpoint auth is not supported
 - **$ref resolution** — only local (`#/components/...`) refs are resolved; external file refs are not supported
