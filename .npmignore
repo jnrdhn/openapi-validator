@@ -1,0 +1,8 @@
+# Test reports
+*.json
+!package.json
+
+# Dev/local files
+.claude/
+CLAUDE.md
+bun.lock
