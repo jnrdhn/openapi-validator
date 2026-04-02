@@ -99,7 +99,18 @@ const STATUS_COLORS: Record<string, string> = {
 const RESET = "\x1b[0m";
 const DIM = "\x1b[2m";
 
-function printProgress(result: EndpointResult, index: number, total: number): void {
+const BAR_WIDTH = 28;
+const bufferedLines: string[] = [];
+
+function renderProgressBar(completed: number, total: number): string {
+  const pct = total > 0 ? completed / total : 0;
+  const filled = Math.round(pct * BAR_WIDTH);
+  const bar = "█".repeat(filled) + "░".repeat(BAR_WIDTH - filled);
+  const pctStr = `${Math.round(pct * 100)}%`.padStart(4);
+  return `  [${bar}] ${String(completed).padStart(String(total).length)}/${total} ${pctStr}`;
+}
+
+function formatResult(result: EndpointResult, index: number, total: number): string {
   const icon = STATUS_ICONS[result.status] ?? "?";
   const color = STATUS_COLORS[result.status] ?? "";
   const pad = String(index).padStart(String(total).length, " ");
@@ -107,11 +118,23 @@ function printProgress(result: EndpointResult, index: number, total: number): vo
   const ms = `${result.durationMs}ms`;
   const deprecated = result.deprecated ? ` ${DIM}(deprecated)${RESET}` : "";
 
-  console.log(
+  return (
     `  ${DIM}${pad}/${total}${RESET} ${color}${icon} ${result.method.padEnd(7)}${RESET} ` +
     `${DIM}${http.padEnd(6)}${RESET} ${result.path}${deprecated}` +
     `  ${DIM}${ms}${RESET}`
   );
+}
+
+function printProgress(result: EndpointResult, index: number, total: number): void {
+  bufferedLines.push(formatResult(result, index, total));
+  process.stdout.write(`\r${renderProgressBar(index, total)}`);
+}
+
+function flushProgress(total: number): void {
+  // Clear the progress bar line, then print all buffered result lines
+  process.stdout.write(`\r${" ".repeat(BAR_WIDTH + 20)}\r`);
+  for (const line of bufferedLines) console.log(line);
+  bufferedLines.length = 0;
 }
 
 // ─── Report Printer ───────────────────────────────────────────────────────────
@@ -245,12 +268,16 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  process.stdout.write(renderProgressBar(0, endpoints.length));
+
   const rawReport = await validateEndpoints(
     endpoints,
     baseUrl,
     config,
     printProgress
   );
+
+  flushProgress(endpoints.length);
 
   const report = buildFinalReport(rawReport, spec.info.title, spec.info.version);
 
